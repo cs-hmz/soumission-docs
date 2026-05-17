@@ -1,118 +1,63 @@
 ﻿<?php
-header('Content-Type: application/json; charset=utf-8');
-require_once __DIR__ . '/db.php';
-
-$cookieParams = session_get_cookie_params();
-session_set_cookie_params([
-    'lifetime' => $cookieParams['lifetime'],
-    'path' => $cookieParams['path'],
-    'domain' => $cookieParams['domain'],
-    'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
-    'httponly' => true,
-    'samesite' => 'Strict',
-]);
 session_start();
+require_once 'db.php';
 
-$response = ['status' => 'error', 'message' => ''];
+header('Content-Type: application/json');
 
-if (empty($_SESSION['user_id'])) {
-    $response['message'] = 'Session non active. Veuillez vous connecter.';
-    echo json_encode($response);
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'etudiant') {
+    echo json_encode(['success' => false, 'message' => 'Non autorisé.']);
     exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !isset($_FILES['file'])) {
-    $response['message'] = 'Aucun fichier envoyé.';
-    echo json_encode($response);
+if (!isset($_FILES['fichier']) || $_FILES['fichier']['error'] !== UPLOAD_ERR_OK) {
+    echo json_encode(['success' => false, 'message' => 'Erreur lors de la réception du fichier.']);
     exit;
 }
 
-$file = $_FILES['file'];
-$maxSize = 10 * 1024 * 1024; // 10 Mo
-$allowedMimeTypes = [
-    'application/pdf',
-    'image/png',
-    'image/jpeg',
-    'image/jpg',
-];
+$fichier     = $_FILES['fichier'];
+$taille_max  = 5 * 1024 * 1024; // 5 Mo
+$types_ok    = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif'];
 
-if ($file['error'] !== UPLOAD_ERR_OK) {
-    $response['message'] = 'Erreur lors de l’upload du fichier.';
-    switch ($file['error']) {
-        case UPLOAD_ERR_INI_SIZE:
-        case UPLOAD_ERR_FORM_SIZE:
-            $response['message'] = 'Le fichier est trop volumineux.';
-            break;
-        case UPLOAD_ERR_PARTIAL:
-            $response['message'] = 'Le fichier n’a été que partiellement téléchargé.';
-            break;
-        case UPLOAD_ERR_NO_FILE:
-            $response['message'] = 'Aucun fichier n’a été sélectionné.';
-            break;
-    }
-    echo json_encode($response);
+// Vérification taille
+if ($fichier['size'] > $taille_max) {
+    echo json_encode(['success' => false, 'message' => 'Fichier trop volumineux (max 5 Mo).']);
     exit;
 }
 
-if ($file['size'] > $maxSize) {
-    $response['message'] = 'Le fichier dépasse la taille maximale autorisée de 10 Mo.';
-    echo json_encode($response);
+// Vérification MIME réelle (pas juste l'extension)
+$finfo     = new finfo(FILEINFO_MIME_TYPE);
+$type_mime = $finfo->file($fichier['tmp_name']);
+
+if (!in_array($type_mime, $types_ok, true)) {
+    echo json_encode(['success' => false, 'message' => 'Type de fichier non autorisé (PDF, JPG, PNG, GIF uniquement).']);
     exit;
 }
 
-$finfo = new finfo(FILEINFO_MIME_TYPE);
-$mimeType = $finfo->file($file['tmp_name']);
-if ($mimeType === false || !in_array($mimeType, $allowedMimeTypes, true)) {
-    $response['message'] = 'Type de fichier non pris en charge. Seuls les PDF et les images sont autorisés.';
-    echo json_encode($response);
+// Dossier uploads
+$dossier = __DIR__ . '/uploads/';
+if (!is_dir($dossier)) {
+    mkdir($dossier, 0755, true);
+}
+
+// Nom de stockage unique
+$ext          = pathinfo($fichier['name'], PATHINFO_EXTENSION);
+$nom_stockage = uniqid('file_', true) . '.' . strtolower($ext);
+$chemin       = $dossier . $nom_stockage;
+
+if (!move_uploaded_file($fichier['tmp_name'], $chemin)) {
+    echo json_encode(['success' => false, 'message' => 'Impossible de sauvegarder le fichier.']);
     exit;
 }
 
-$originalName = basename($file['name']);
-$extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
-$baseName = pathinfo($originalName, PATHINFO_FILENAME);
-$safeBaseName = preg_replace('/[^A-Za-z0-9_-]/', '_', $baseName);
-$safeBaseName = substr($safeBaseName, 0, 100);
-$storedName = sprintf('%s_%s.%s', time(), bin2hex(random_bytes(6)), $extension);
-$uploadDir = __DIR__ . '/uploads';
+// Enregistrement en base
+$pdo  = getPDO();
+$stmt = $pdo->prepare('INSERT INTO fichiers (etudiant_id, nom_fichier, nom_stockage, type_mime, taille) VALUES (?,?,?,?,?)');
+$stmt->execute([
+    $_SESSION['user_id'],
+    $fichier['name'],
+    $nom_stockage,
+    $type_mime,
+    $fichier['size'],
+]);
 
-if (!is_dir($uploadDir) && !mkdir($uploadDir, 0755, true) && !is_dir($uploadDir)) {
-    $response['message'] = 'Impossible de créer le dossier uploads.';
-    echo json_encode($response);
-    exit;
-}
-
-$destination = $uploadDir . DIRECTORY_SEPARATOR . $storedName;
-if (!move_uploaded_file($file['tmp_name'], $destination)) {
-    $response['message'] = 'Impossible de déplacer le fichier téléchargé.';
-    echo json_encode($response);
-    exit;
-}
-
-try {
-    $sql = 'INSERT INTO fichiers (id_etudiant, nom_fichier, nom_original, type_mime, taille, date_upload) VALUES (:id_etudiant, :nom_fichier, :nom_original, :type_mime, :taille, NOW())';
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([
-        ':id_etudiant' => $_SESSION['user_id'],
-        ':nom_fichier' => $storedName,
-        ':nom_original' => $originalName,
-        ':type_mime' => $mimeType,
-        ':taille' => $file['size'],
-    ]);
-
-    $response['status'] = 'success';
-    $response['message'] = 'Fichier téléversé avec succès.';
-    $response['file'] = [
-        'original_name' => $originalName,
-        'stored_name' => $storedName,
-        'type' => $mimeType,
-        'size' => $file['size'],
-    ];
-} catch (PDOException $e) {
-    if (file_exists($destination)) {
-        unlink($destination);
-    }
-    $response['message'] = 'Impossible d’enregistrer le fichier en base de données.';
-}
-
-echo json_encode($response);
+echo json_encode(['success' => true, 'message' => 'Fichier envoyé avec succès !']);

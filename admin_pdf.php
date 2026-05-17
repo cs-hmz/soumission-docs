@@ -1,118 +1,122 @@
 ﻿<?php
-require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/vendor/autoload.php';
-
-$cookieParams = session_get_cookie_params();
-session_set_cookie_params([
-    'lifetime' => $cookieParams['lifetime'],
-    'path' => $cookieParams['path'],
-    'domain' => $cookieParams['domain'],
-    'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
-    'httponly' => true,
-    'samesite' => 'Strict',
-]);
 session_start();
+require_once 'db.php';
 
-if (empty($_SESSION['user_id']) || ($_SESSION['user_role'] ?? '') !== 'admin') {
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'admin') {
     header('Location: login.php');
     exit;
 }
 
-try {
-    $studentSql = 'SELECT id, nom, prenom, email, date_inscription FROM etudiants ORDER BY nom, prenom';
-    $stmt = $pdo->query($studentSql);
-    $students = $stmt->fetchAll();
-
-    $filesSql = 'SELECT id_etudiant, nom_original, type_mime, taille, date_upload FROM fichiers ORDER BY date_upload DESC';
-    $stmt = $pdo->query($filesSql);
-    $files = $stmt->fetchAll();
-} catch (PDOException $e) {
-    echo '<h1>Erreur</h1><p>Impossible de récupérer les données.</p>';
-    exit;
+if (!file_exists(__DIR__ . '/vendor/autoload.php')) {
+    die('mPDF non installé. Exécutez : composer require mpdf/mpdf');
 }
 
-$fileMap = [];
-foreach ($files as $file) {
-    $fileMap[$file['id_etudiant']][] = $file;
+require_once __DIR__ . '/vendor/autoload.php';
+
+$pdo = getPDO();
+
+// Récupérer tous les étudiants avec leurs fichiers
+$stmt = $pdo->query('
+    SELECT e.id, e.nom, e.prenom, e.num_apogee, e.email, e.date_inscription
+    FROM etudiants e
+    ORDER BY e.nom, e.prenom
+');
+$etudiants = $stmt->fetchAll();
+
+// Pour chaque étudiant, récupérer ses fichiers
+foreach ($etudiants as &$e) {
+    $s = $pdo->prepare('SELECT nom_fichier, type_mime, taille, date_envoi FROM fichiers WHERE etudiant_id = ? ORDER BY date_envoi DESC');
+    $s->execute([$e['id']]);
+    $e['fichiers'] = $s->fetchAll();
 }
+unset($e);
 
-function escape($v) { return htmlspecialchars($v, ENT_QUOTES, 'UTF-8'); }
-function formatSize($bytes) {
-    if ($bytes >= 1048576) return number_format($bytes / 1048576, 2, ',', ' ') . ' Mo';
-    if ($bytes >= 1024) return number_format($bytes / 1024, 2, ',', ' ') . ' Ko';
-    return $bytes . ' o';
-}
-function formatDate($v) { try { return (new DateTime($v))->format('d/m/Y H:i'); } catch (Exception $e) { return ''; } }
-
-$rows = '';
-foreach ($students as $s) {
-    $sid = $s['id'];
-    $dateInscription = !empty($s['date_inscription']) ? formatDate($s['date_inscription']) : '-';
-    $studentName = escape($s['prenom'] . ' ' . $s['nom']);
-    $email = escape($s['email']);
-    $studentFiles = $fileMap[$sid] ?? [];
-
-    if (count($studentFiles) === 0) {
-        $filesHtml = '<em>Aucun fichier</em>';
-    } else {
-        $list = [];
-        foreach ($studentFiles as $f) {
-            $list[] = escape($f['nom_original']) . ' (' . escape($f['type_mime']) . ', ' . escape(formatSize($f['taille'])) . ', ' . escape(formatDate($f['date_upload'])) . ')';
-        }
-        $filesHtml = implode('<br>', $list);
-    }
-
-    $rows .= '<tr>' .
-        '<td>' . escape($sid) . '</td>' .
-        '<td>' . escape($s['nom']) . '</td>' .
-        '<td>' . escape($s['prenom']) . '</td>' .
-        '<td>' . $email . '</td>' .
-        '<td>' . $dateInscription . '</td>' .
-        '<td>' . $filesHtml . '</td>' .
-        '</tr>';
-}
-
-$html = '<!doctype html><html lang="fr"><head><meta charset="utf-8"><style>' .
-    'body{font-family:Arial,Helvetica,sans-serif;color:#222;margin:0;padding:16px}' .
-    'table{width:100%;border-collapse:collapse;margin-top:12px}' .
-    'th,td{border:1px solid #ddd;padding:8px;text-align:left}' .
-    'th{background:#f3f4f6}' .
-    '</style></head><body>' .
-    '<h1>Récapitulatif global des étudiants</h1>' .
-    '<table><thead><tr><th>ID</th><th>Nom</th><th>Prénom</th><th>Email</th><th>Date d\'inscription</th><th>Fichiers</th></tr></thead><tbody>' .
-    $rows .
-    '</tbody></table></body></html>';
-
-$pdfDir = __DIR__ . '/pdf';
-if (!is_dir($pdfDir) && !mkdir($pdfDir, 0755, true) && !is_dir($pdfDir)) {
-    echo '<p>Impossible de créer le dossier pdf/.</p>';
-    exit;
-}
-
-$outPath = $pdfDir . DIRECTORY_SEPARATOR . 'admin_recap.pdf';
-try {
-    $mpdf = new \Mpdf\Mpdf();
-    $mpdf->WriteHTML($html);
-    $mpdf->Output($outPath, \Mpdf\Output\Destination::FILE);
-} catch (\Mpdf\MpdfException $e) {
-    echo '<p>Erreur lors de la génération du PDF: ' . escape($e->getMessage()) . '</p>';
-    exit;
-}
+ob_start();
 ?>
-<!doctype html>
-<html lang="fr">
+<!DOCTYPE html>
+<html>
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Export PDF - Administration</title>
-<style>body{font-family:Arial,Helvetica,sans-serif;padding:24px;color:#222} .card{background:#fff;border:1px solid #e6e6e6;padding:18px;border-radius:12px;max-width:800px} a.button{display:inline-block;margin-top:12px;padding:10px 14px;background:#2563eb;color:#fff;border-radius:999px;text-decoration:none}</style>
+<meta charset="UTF-8">
+<style>
+    body         { font-family: dejavusans, sans-serif; font-size: 11px; color: #1e293b; }
+    h1           { color: #1d4ed8; font-size: 18px; text-align: center; margin-bottom: 4px; }
+    .subtitle    { text-align: center; color: #64748b; font-size: 10px; margin-bottom: 16px; }
+    h2           { color: #1d4ed8; font-size: 12px; background: #eff6ff; padding: 5px 8px; margin: 16px 0 4px; border-left: 3px solid #2563eb; }
+    table        { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+    th           { background: #1d4ed8; color: white; padding: 5px 6px; text-align: left; font-size: 10px; }
+    td           { padding: 5px 6px; border-bottom: 1px solid #e2e8f0; font-size: 10px; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    .no-files    { color: #94a3b8; font-style: italic; font-size: 10px; padding: 4px 0; }
+    .count       { font-weight: bold; color: #2563eb; }
+</style>
 </head>
 <body>
-<div class="card">
-<h2>PDF généré avec succès</h2>
-<p>Le fichier global a été enregistré : <strong>pdf/admin_recap.pdf</strong></p>
-<p><a class="button" href="pdf/admin_recap.pdf" target="_blank" rel="noopener">Télécharger le PDF</a></p>
-<p><a href="admin_dashboard.php">Retour au tableau de bord</a></p>
-</div>
+<h1>Plateforme Étudiante — Récapitulatif Global</h1>
+<p class="subtitle">Exporté par l'administrateur le <?= date('d/m/Y à H:i') ?> | <?= count($etudiants) ?> étudiant(s)</p>
+
+<!-- Résumé global -->
+<table>
+    <thead>
+        <tr>
+            <th>ID</th>
+            <th>Nom Complet</th>
+            <th>Email</th>
+            <th>Apogée</th>
+            <th>Inscription</th>
+            <th>Nb fichiers</th>
+        </tr>
+    </thead>
+    <tbody>
+        <?php foreach ($etudiants as $e): ?>
+        <tr>
+            <td><?= $e['id'] ?></td>
+            <td><?= htmlspecialchars($e['prenom'] . ' ' . $e['nom']) ?></td>
+            <td><?= htmlspecialchars($e['email']) ?></td>
+            <td><?= htmlspecialchars($e['num_apogee']) ?></td>
+            <td><?= htmlspecialchars($e['date_inscription']) ?></td>
+            <td class="count"><?= count($e['fichiers']) ?></td>
+        </tr>
+        <?php endforeach; ?>
+    </tbody>
+</table>
+
+<!-- Détail par étudiant -->
+<?php foreach ($etudiants as $e): ?>
+<h2><?= htmlspecialchars($e['prenom'] . ' ' . $e['nom']) ?> — <?= htmlspecialchars($e['email']) ?></h2>
+<?php if (empty($e['fichiers'])): ?>
+    <p class="no-files">Aucun fichier envoyé.</p>
+<?php else: ?>
+<table>
+    <thead>
+        <tr><th>#</th><th>Nom du fichier</th><th>Type</th><th>Taille</th><th>Date d'envoi</th></tr>
+    </thead>
+    <tbody>
+        <?php foreach ($e['fichiers'] as $i => $f): ?>
+        <tr>
+            <td><?= $i + 1 ?></td>
+            <td><?= htmlspecialchars($f['nom_fichier']) ?></td>
+            <td><?= htmlspecialchars($f['type_mime']) ?></td>
+            <td><?= round($f['taille'] / 1024, 1) ?> Ko</td>
+            <td><?= htmlspecialchars($f['date_envoi']) ?></td>
+        </tr>
+        <?php endforeach; ?>
+    </tbody>
+</table>
+<?php endif; ?>
+<?php endforeach; ?>
+
 </body>
 </html>
+<?php
+$html = ob_get_clean();
+
+$mpdf = new \Mpdf\Mpdf([
+    'margin_top'    => 12,
+    'margin_bottom' => 12,
+    'margin_left'   => 12,
+    'margin_right'  => 12,
+]);
+$mpdf->SetTitle('Récapitulatif Global — Plateforme Étudiante');
+$mpdf->SetAuthor('Administration');
+$mpdf->WriteHTML($html);
+$mpdf->Output('recapitulatif_global_' . date('Ymd') . '.pdf', \Mpdf\Output\Destination::DOWNLOAD);

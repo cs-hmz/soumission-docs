@@ -1,112 +1,106 @@
 ﻿<?php
-require_once __DIR__ . '/db.php';
-require_once __DIR__ . '/vendor/autoload.php';
-
-$cookieParams = session_get_cookie_params();
-session_set_cookie_params([
-    'lifetime' => $cookieParams['lifetime'],
-    'path' => $cookieParams['path'],
-    'domain' => $cookieParams['domain'],
-    'secure' => !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off',
-    'httponly' => true,
-    'samesite' => 'Strict',
-]);
 session_start();
+require_once 'db.php';
 
-if (empty($_SESSION['user_id']) || ($_SESSION['user_role'] ?? '') !== 'etudiant') {
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'etudiant') {
     header('Location: login.php');
     exit;
 }
 
-$userId = (int) $_SESSION['user_id'];
-
-try {
-    $studentSql = 'SELECT nom, prenom, email, apogee FROM etudiants WHERE id = :id LIMIT 1';
-    $stmt = $pdo->prepare($studentSql);
-    $stmt->execute([':id' => $userId]);
-    $student = $stmt->fetch();
-
-    if (!$student) {
-        throw new Exception('Étudiant introuvable.');
-    }
-
-    $filesSql = 'SELECT nom_original, type_mime, taille, date_upload FROM fichiers WHERE id_etudiant = :id_etudiant ORDER BY date_upload DESC';
-    $stmt = $pdo->prepare($filesSql);
-    $stmt->execute([':id_etudiant' => $userId]);
-    $files = $stmt->fetchAll();
-} catch (Exception $e) {
-    echo '<h1>Erreur</h1><p>' . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . '</p>';
-    exit;
+// Vérifier mPDF disponible
+if (!file_exists(__DIR__ . '/vendor/autoload.php')) {
+    die('mPDF non installé. Exécutez : composer require mpdf/mpdf');
 }
 
-$pdfDir = __DIR__ . '/pdf';
-if (!is_dir($pdfDir) && !mkdir($pdfDir, 0755, true) && !is_dir($pdfDir)) {
-    echo '<h1>Erreur</h1><p>Impossible de créer le dossier de stockage PDF.</p>';
-    exit;
-}
+require_once __DIR__ . '/vendor/autoload.php';
 
-$fileName = sprintf('recap_%d.pdf', $userId);
-$filePath = $pdfDir . DIRECTORY_SEPARATOR . $fileName;
+$pdo = getPDO();
+$id  = $_SESSION['user_id'];
 
-$studentName = htmlspecialchars(trim($student['prenom'] . ' ' . $student['nom']), ENT_QUOTES, 'UTF-8');
-$studentEmail = htmlspecialchars($student['email'], ENT_QUOTES, 'UTF-8');
-$studentApogee = htmlspecialchars($student['apogee'], ENT_QUOTES, 'UTF-8');
+// Récupérer étudiant
+$stmt = $pdo->prepare('SELECT * FROM etudiants WHERE id = ?');
+$stmt->execute([$id]);
+$etudiant = $stmt->fetch();
 
-$rowsHtml = '';
-if (count($files) === 0) {
-    $rowsHtml = '<tr><td colspan="4" style="text-align:center; padding:1rem; color:#555;">Aucun fichier envoyé pour le moment.</td></tr>';
-} else {
-    foreach ($files as $file) {
-        $rowsHtml .= '<tr>' .
-            '<td>' . htmlspecialchars($file['nom_original'], ENT_QUOTES, 'UTF-8') . '</td>' .
-            '<td>' . htmlspecialchars($file['type_mime'], ENT_QUOTES, 'UTF-8') . '</td>' .
-            '<td>' . number_format((int)$file['taille'] / 1024, 2, ',', ' ') . ' Ko</td>' .
-            '<td>' . (new DateTime($file['date_upload']))->format('d/m/Y H:i') . '</td>' .
-            '</tr>';
-    }
-}
+// Récupérer fichiers
+$stmt2 = $pdo->prepare('SELECT * FROM fichiers WHERE etudiant_id = ? ORDER BY date_envoi DESC');
+$stmt2->execute([$id]);
+$fichiers = $stmt2->fetchAll();
 
-$html = '<!DOCTYPE html>' .
-    '<html lang="fr">' .
-    '<head>' .
-    '<meta charset="UTF-8">' .
-    '<style>' .
-    'body { font-family: Arial, sans-serif; color: #222; margin: 0; padding: 0; }' .
-    '.container { padding: 24px; }' .
-    'h1 { margin-bottom: 0.5rem; }' .
-    '.meta { margin-bottom: 24px; font-size: 0.95rem; color: #555; }' .
-    'table { width: 100%; border-collapse: collapse; margin-top: 18px; }' .
-    'th, td { border: 1px solid #d6d6d6; padding: 10px 12px; }' .
-    'th { background: #f3f4f6; text-align: left; }' .
-    'tbody tr:nth-child(even) { background: #fbfbfb; }' .
-    '</style>' .
-    '</head>' .
-    '<body>' .
-    '<div class="container">' .
-    '<h1>Récapitulatif des fichiers</h1>' .
-    '<div class="meta">' .
-    '<strong>Étudiant :</strong> ' . $studentName . '<br>' .
-    '<strong>Email :</strong> ' . $studentEmail . '<br>' .
-    '<strong>Apogée :</strong> ' . $studentApogee . '<br>' .
-    '<strong>Date :</strong> ' . date('d/m/Y H:i') .
-    '</div>' .
-    '<table>' .
-    '<thead><tr><th>Nom du fichier</th><th>Type</th><th>Taille</th><th>Date d’envoi</th></tr></thead>' .
-    '<tbody>' .
-    $rowsHtml .
-    '</tbody>' .
-    '</table>' .
-    '</div>' .
-    '</body>' .
-    '</html>';
+// Construire le HTML du PDF
+ob_start();
+?>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+    body { font-family: dejavusans, sans-serif; font-size: 12px; color: #1e293b; }
+    h1 { color: #2563eb; font-size: 20px; text-align: center; margin-bottom: 4px; }
+    h2 { color: #2563eb; font-size: 14px; border-bottom: 1px solid #2563eb; padding-bottom: 4px; margin-top: 20px; }
+    .subtitle { text-align: center; color: #64748b; font-size: 11px; margin-bottom: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th { background: #2563eb; color: white; padding: 6px 8px; text-align: left; font-size: 11px; }
+    td { padding: 6px 8px; border-bottom: 1px solid #e2e8f0; font-size: 11px; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    .info-grid td:first-child { font-weight: bold; width: 35%; color: #475569; }
+    .badge { background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 4px; font-size: 10px; }
+</style>
+</head>
+<body>
+<h1>Plateforme Étudiante de Soumission de Documents</h1>
+<p class="subtitle">Récapitulatif personnel — Généré le <?= date('d/m/Y à H:i') ?></p>
 
-try {
-    $mpdf = new \Mpdf\Mpdf();
-    $mpdf->WriteHTML($html);
-    $mpdf->Output($filePath, \Mpdf\Output\Destination::FILE);
-    header('Location: pdf/' . $fileName);
-    exit;
-} catch (\Mpdf\MpdfException $e) {
-    echo '<h1>Erreur lors de la génération du PDF</h1><p>' . htmlspecialchars($e->getMessage(), ENT_QUOTES, 'UTF-8') . '</p>';
-    exit;
-}
+<h2>Informations personnelles</h2>
+<table class="info-grid">
+    <tr><td>Nom complet</td><td><?= htmlspecialchars($etudiant['prenom'] . ' ' . $etudiant['nom']) ?></td></tr>
+    <tr><td>Numéro Apogée</td><td><?= htmlspecialchars($etudiant['num_apogee']) ?></td></tr>
+    <tr><td>Email</td><td><?= htmlspecialchars($etudiant['email']) ?></td></tr>
+    <tr><td>Date d'inscription</td><td><?= htmlspecialchars($etudiant['date_inscription']) ?></td></tr>
+    <tr><td>Statut</td><td><span class="badge">Compte activé</span></td></tr>
+</table>
+
+<h2>Fichiers envoyés (<?= count($fichiers) ?>)</h2>
+<?php if (empty($fichiers)): ?>
+    <p style="color:#64748b;font-style:italic">Aucun fichier envoyé.</p>
+<?php else: ?>
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Nom du fichier</th>
+            <th>Type</th>
+            <th>Taille</th>
+            <th>Date d'envoi</th>
+        </tr>
+    </thead>
+    <tbody>
+        <?php foreach ($fichiers as $i => $f): ?>
+        <tr>
+            <td><?= $i + 1 ?></td>
+            <td><?= htmlspecialchars($f['nom_fichier']) ?></td>
+            <td><?= htmlspecialchars($f['type_mime']) ?></td>
+            <td><?= round($f['taille'] / 1024, 1) ?> Ko</td>
+            <td><?= htmlspecialchars($f['date_envoi']) ?></td>
+        </tr>
+        <?php endforeach; ?>
+    </tbody>
+</table>
+<?php endif; ?>
+</body>
+</html>
+<?php
+$html = ob_get_clean();
+
+// Générer le PDF avec mPDF
+$mpdf = new \Mpdf\Mpdf([
+    'margin_top'    => 15,
+    'margin_bottom' => 15,
+    'margin_left'   => 15,
+    'margin_right'  => 15,
+]);
+
+$mpdf->SetTitle('Récapitulatif — ' . $etudiant['prenom'] . ' ' . $etudiant['nom']);
+$mpdf->SetAuthor('Plateforme Étudiante');
+$mpdf->WriteHTML($html);
+$mpdf->Output('recapitulatif_' . $etudiant['num_apogee'] . '.pdf', \Mpdf\Output\Destination::DOWNLOAD);

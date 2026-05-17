@@ -1,37 +1,47 @@
 ﻿<?php
+// ============================================
+// db.php — Connexion à la base de données
+// Utilise PDO avec sécurité renforcée
+// ============================================
+
+define('DB_HOST', 'localhost');
+define('DB_NAME', 'etudiants_app');
+define('DB_USER', 'root');          // ← à changer en production
+define('DB_PASS', '');              // ← à changer en production
+define('DB_CHAR', 'utf8mb4');
+
 /**
- * Database connection helper using PDO.
- *
- * Configure your database credentials below.
+ * Retourne une connexion PDO singleton.
  */
-function getConnection(): PDO
+function getPDO(): PDO
 {
-    $host = 'localhost';
-    $dbname = 'soumission_docs';
-    $user = 'root';
-    $password = '';
-
-    $dsn = "mysql:host=$host;dbname=$dbname;charset=utf8mb4";
-    $options = [
-        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-        PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-        PDO::ATTR_EMULATE_PREPARES => false,
-    ];
-
     static $pdo = null;
-    if ($pdo instanceof PDO) {
-        return $pdo;
+
+    if ($pdo === null) {
+        $dsn = sprintf(
+            'mysql:host=%s;dbname=%s;charset=%s',
+            DB_HOST,
+            DB_NAME,
+            DB_CHAR
+        );
+
+        $options = [
+            PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
+            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
+            PDO::ATTR_EMULATE_PREPARES   => false,  // requêtes préparées réelles
+        ];
+
+        try {
+            $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
+        } catch (PDOException $e) {
+            // En production, ne jamais afficher le message brut
+            error_log('Erreur PDO : ' . $e->getMessage());
+            die(json_encode([
+                'success' => false,
+                'message' => 'Erreur de connexion à la base de données.'
+            ]));
+        }
     }
 
-    try {
-        $pdo = new PDO($dsn, $user, $password, $options);
-        return $pdo;
-    } catch (PDOException $e) {
-        http_response_code(500);
-        echo 'Erreur de connexion à la base de données. Vérifiez la configuration de db.php.';
-        exit;
-    }
+    return $pdo;
 }
-
-/** @var PDO $pdo */
-$pdo = getConnection();
